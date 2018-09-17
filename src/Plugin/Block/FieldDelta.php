@@ -10,6 +10,7 @@ use Drupal\Core\Cache\CacheableMetadata;
 use Drupal\Core\Entity\Entity\EntityFormDisplay;
 use Drupal\Core\Entity\EntityDisplayBase;
 use Drupal\Core\Entity\EntityFieldManagerInterface;
+use Drupal\Core\Entity\EntityInterface;
 use Drupal\Core\Entity\FieldableEntityInterface;
 use Drupal\Core\Extension\ModuleHandlerInterface;
 use Drupal\Core\Field\FieldDefinitionInterface;
@@ -21,6 +22,7 @@ use Drupal\Core\Plugin\ContextAwarePluginInterface;
 use Drupal\Core\Render\Element;
 use Drupal\Core\Session\AccountInterface;
 use Drupal\Core\StringTranslation\TranslatableMarkup;
+use Drupal\node\Entity\Node;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 
@@ -217,22 +219,26 @@ class FieldDelta extends BlockBase implements ContextAwarePluginInterface, Conta
    * {@inheritdoc}
    */
   public function blockForm($form, FormStateInterface $form_state) {
-    $config = $this->getConfiguration();
     if ($build_info = $form_state->getBuildInfo()) {
       /** @var \Drupal\layout_builder\Plugin\SectionStorage\OverridesSectionStorage $override_storage */
       $override_storage = $build_info['args'][0];
       $entity = $override_storage->getEntity();
-      // Add the field form.
-      $form_display = EntityFormDisplay::collectRenderDisplay($entity, 'edit');
-      $fo->buildForm($entity, $form, $form_state);
+      if (!$form_state->has('entity')) {
+        $this->init($form_state, $entity);
+      }
 
-      // Add a submit button. Give it a class for easy JavaScript targeting.
+      // Add the field form.
+      $form_state->get('form_display')->buildForm($entity, $form, $form_state);
+
+
+
+     /* // Add a submit button. Give it a class for easy JavaScript targeting.
       $form['actions'] = ['#type' => 'actions'];
       $form['actions']['submit'] = [
         '#type' => 'submit',
         '#value' => t('Save'),
         //'#attributes' => ['class' => ['quickedit-form-submit']],
-      ];
+      ];*/
     }
 
 
@@ -242,6 +248,32 @@ class FieldDelta extends BlockBase implements ContextAwarePluginInterface, Conta
     return $form;
   }
 
+  /**
+   * Initialize the form state and the entity before the first form build.
+   */
+  protected function init(FormStateInterface $form_state, FieldableEntityInterface $entity) {
+    $form_state->set('entity', $entity);
+    $field_name = $this->getFieldName();
+    $form_state->set('field_name', $field_name);
+
+    /** @var \Drupal\Core\Field\FieldItemListInterface $field */
+    $field = $entity->get($field_name);
+    if ($field->count() === 0) {
+      $field->appendItem();
+
+    }
+
+
+    // Fetch the display used by the form. It is the display for the 'default'
+    // form mode, with only the current field visible.
+    $display = EntityFormDisplay::collectRenderDisplay($entity, 'default');
+    foreach ($display->getComponents() as $name => $options) {
+      if ($name != $field_name) {
+        $display->removeComponent($name);
+      }
+    }
+    $form_state->set('form_display', $display);
+  }
 
   /**
    * {@inheritdoc}
@@ -250,6 +282,16 @@ class FieldDelta extends BlockBase implements ContextAwarePluginInterface, Conta
     $this->configuration['formatter'] = $form_state->getValue('formatter');
   }
 
+  /**
+   * Gets the field name.
+   *
+   * @return string
+   */
+  protected function getFieldName() {
+    $id = $this->getConfiguration()['id'];
+    $parts = explode(':', $id);
+    return array_pop($parts);
+  }
 
 
 }
