@@ -5,6 +5,7 @@ namespace Drupal\layout_builder_fields\Plugin\Derivative;
 use Drupal\Component\Plugin\Derivative\DeriverBase;
 use Drupal\Component\Plugin\PluginBase;
 use Drupal\Core\Entity\EntityFieldManagerInterface;
+use Drupal\Core\Entity\EntityTypeManagerInterface;
 use Drupal\Core\Entity\EntityTypeRepositoryInterface;
 use Drupal\Core\Field\BaseFieldDefinition;
 use Drupal\Core\Field\FieldConfigInterface;
@@ -12,6 +13,7 @@ use Drupal\Core\Field\FieldStorageDefinitionInterface;
 use Drupal\Core\Field\FieldTypePluginManagerInterface;
 use Drupal\Core\Field\FormatterPluginManager;
 use Drupal\Core\Plugin\Context\ContextDefinition;
+use Drupal\Core\Plugin\Context\EntityContextDefinition;
 use Drupal\Core\Plugin\Discovery\ContainerDeriverInterface;
 use Drupal\Core\StringTranslation\StringTranslationTrait;
 use Symfony\Component\DependencyInjection\ContainerInterface;
@@ -54,6 +56,13 @@ class FieldDelta extends DeriverBase implements ContainerDeriverInterface {
   protected $formatterManager;
 
   /**
+   * The entity type manager.
+   *
+   * @var \Drupal\Core\Entity\EntityTypeManagerInterface
+   */
+  protected $entityTypeManager;
+
+  /**
    * Constructs new FieldBlockDeriver.
    *
    * @param \Drupal\Core\Entity\EntityTypeRepositoryInterface $entity_type_repository
@@ -65,11 +74,12 @@ class FieldDelta extends DeriverBase implements ContainerDeriverInterface {
    * @param \Drupal\Core\Field\FormatterPluginManager $formatter_manager
    *   The formatter manager.
    */
-  public function __construct(EntityTypeRepositoryInterface $entity_type_repository, EntityFieldManagerInterface $entity_field_manager, FieldTypePluginManagerInterface $field_type_manager, FormatterPluginManager $formatter_manager) {
+  public function __construct(EntityTypeRepositoryInterface $entity_type_repository, EntityFieldManagerInterface $entity_field_manager, FieldTypePluginManagerInterface $field_type_manager, FormatterPluginManager $formatter_manager, EntityTypeManagerInterface $entity_type_manager) {
     $this->entityTypeRepository = $entity_type_repository;
     $this->entityFieldManager = $entity_field_manager;
     $this->fieldTypeManager = $field_type_manager;
     $this->formatterManager = $formatter_manager;
+    $this->entityTypeManager = $entity_type_manager;
   }
 
   /**
@@ -80,7 +90,8 @@ class FieldDelta extends DeriverBase implements ContainerDeriverInterface {
       $container->get('entity_type.repository'),
       $container->get('entity_field.manager'),
       $container->get('plugin.manager.field.field_type'),
-      $container->get('plugin.manager.field.formatter')
+      $container->get('plugin.manager.field.formatter'),
+      $container->get('entity_type.manager')
     );
   }
 
@@ -104,7 +115,6 @@ class FieldDelta extends DeriverBase implements ContainerDeriverInterface {
         }
 
         foreach ($field_info['bundles'] as $bundle) {
-          $derivative = $base_plugin_definition;
           $field_definition = $this->entityFieldManager->getFieldDefinitions($entity_type_id, $bundle)[$field_name];
           if (($field_definition instanceof FieldStorageDefinitionInterface && $field_definition->isBaseField())  ||  $field_definition->isComputed() || $field_definition->isReadOnly()) {
             continue;
@@ -115,35 +125,52 @@ class FieldDelta extends DeriverBase implements ContainerDeriverInterface {
             continue;
           }
 
-          // Store the default formatter on the definition.
-          $derivative['default_formatter'] = '';
-          $field_type_definition = $this->fieldTypeManager->getDefinition($field_info['type']);
-          if (isset($field_type_definition['default_formatter'])) {
-            $derivative['default_formatter'] = $field_type_definition['default_formatter'];
+          $target_bundles = $field_definition->getSetting('handler_settings')['target_bundles'];
+          $target_type = $this->entityTypeManager->getDefinition($field_definition->getSetting('target_type'));
+          if ($bundle_entity_type_id = $target_type->getBundleEntityType()) {
+            $bundle_types = $this->entityTypeManager->getStorage($bundle_entity_type_id)->loadMultiple($target_bundles);
+          }
+          else {
+            continue;
           }
 
-          $derivative['category'] = $this->t('@entity', ['@entity' => $entity_type_labels[$entity_type_id]]);
+          foreach ($target_bundles as $target_bundle) {
+            $derivative = $base_plugin_definition;
+            // Store the default formatter on the definition.
+            $derivative['default_formatter'] = '';
+            $field_type_definition = $this->fieldTypeManager->getDefinition($field_info['type']);
+            if (isset($field_type_definition['default_formatter'])) {
+              $derivative['default_formatter'] = $field_type_definition['default_formatter'];
+            }
 
-          $derivative['admin_label'] = $this->t('Add') . ' ' . $field_definition->getLabel();
+            $derivative['category'] = $this->t('@entity: inline fields', ['@entity' => $entity_type_labels[$entity_type_id]]);
 
-          // Add a dependency on the field if it is configurable.
-          if ($field_definition instanceof FieldConfigInterface) {
-            $derivative['config_dependencies'][$field_definition->getConfigDependencyKey()][] = $field_definition->getConfigDependencyName();
+            // @todo Use field name also in label?
+            $derivative['admin_label'] = $this->t('Add') . ' ' . $bundle_types[$target_bundle]->label();
+            $derivative['field_name'] = $field_name;
+            $derivative['target_bundle'] = $target_bundle;
+            $derivative['target_type'] = $target_type->id();
+
+            // Add a dependency on the field if it is configurable.
+            if ($field_definition instanceof FieldConfigInterface) {
+              $derivative['config_dependencies'][$field_definition->getConfigDependencyKey()][] = $field_definition->getConfigDependencyName();
+            }
+            // For any field that is not display configurable, mark it as
+            // unavailable to place in the block UI.
+            $derivative['_block_ui_hidden'] = !$field_definition->isDisplayConfigurable('view');
+
+            // @todo Use EntityContextDefinition after resolving
+            //   https://www.drupal.org/node/2932462.
+            $context_definition = new EntityContextDefinition($entity_type_id, $entity_type_labels[$entity_type_id], TRUE);
+            $context_definition->addConstraint('Bundle', [$bundle]);
+            $derivative['context'] = [
+              'entity' => $context_definition,
+            ];
+
+            $derivative_id = $entity_type_id . PluginBase::DERIVATIVE_SEPARATOR . $bundle . PluginBase::DERIVATIVE_SEPARATOR . $field_name . PluginBase::DERIVATIVE_SEPARATOR . $target_bundle;
+            $this->derivatives[$derivative_id] = $derivative;
           }
-          // For any field that is not display configurable, mark it as
-          // unavailable to place in the block UI.
-          $derivative['_block_ui_hidden'] = !$field_definition->isDisplayConfigurable('view');
 
-          // @todo Use EntityContextDefinition after resolving
-          //   https://www.drupal.org/node/2932462.
-          $context_definition = new ContextDefinition('entity:' . $entity_type_id, $entity_type_labels[$entity_type_id], TRUE);
-          $context_definition->addConstraint('Bundle', [$bundle]);
-          $derivative['context'] = [
-            'entity' => $context_definition,
-          ];
-
-          $derivative_id = $entity_type_id . PluginBase::DERIVATIVE_SEPARATOR . $bundle . PluginBase::DERIVATIVE_SEPARATOR . $field_name;
-          $this->derivatives[$derivative_id] = $derivative;
         }
       }
     }
